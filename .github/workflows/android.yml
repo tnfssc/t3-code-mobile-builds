@@ -148,7 +148,8 @@ jobs:
           "$build_tools/zipalign" -c -P 16 4 dist/t3-code-mobile-builds-arm64.apk
           "$build_tools/apksigner" verify --verbose --print-certs dist/t3-code-mobile-builds-arm64.apk | tee "$RUNNER_TEMP/apk-signature.txt"
           grep -F "Signer #1 certificate SHA-256 digest: $APK_CERTIFICATE_SHA256" "$RUNNER_TEMP/apk-signature.txt"
-          "$build_tools/aapt" dump badging dist/t3-code-mobile-builds-arm64.apk | head -1 | tee "$RUNNER_TEMP/apk-identity.txt"
+          "$build_tools/aapt" dump badging dist/t3-code-mobile-builds-arm64.apk > "$RUNNER_TEMP/apk-badging.txt"
+          head -1 "$RUNNER_TEMP/apk-badging.txt" | tee "$RUNNER_TEMP/apk-identity.txt"
           grep -F "name='com.tnfssc.t3code.mobilebuilds'" "$RUNNER_TEMP/apk-identity.txt"
           unzip -l dist/t3-code-mobile-builds-arm64.apk | grep -F assets/index.android.bundle
 
