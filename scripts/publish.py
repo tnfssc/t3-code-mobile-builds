@@ -23,7 +23,7 @@ files = [apk, dist / "build-info.json", dist / "UPSTREAM-LICENSE.txt"]
 notes = f"""Independent Android build of [T3 Code]({plan['upstream_release']}).
 
 - Upstream: `{plan['upstream_tag']}` / `{plan['upstream_sha']}`
-- Android app: `{plan['version_name']}`, orchestration protocol 2
+- Android app: `{plan['version_name']}`, orchestration protocol {plan['orchestration_protocol']}
 - CPU: ARM64 (modern Android phones); Android 7.0 or newer
 - Package: `{plan['package']}`; installs alongside the official app
 - Supports direct connections (LAN/Tailscale). T3 Connect account login and upstream OTA updates are disabled.

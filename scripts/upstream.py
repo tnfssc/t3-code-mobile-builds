@@ -40,14 +40,8 @@ def output(**values):
             destination.write(f"{key}={value}\n")
 
 
-def input_fingerprint(upstream, builder=ROOT):
-    # Hash blob IDs + paths, excluding commit SHA: web/server-only nightlies skip.
-    source = subprocess.check_output(
-        ["git", "ls-tree", "-r", "HEAD", "--", *INPUT_PATHS], cwd=upstream
-    )
-    if b"apps/mobile/app.config.ts" not in source:
-        raise ValueError("Upstream checkout does not contain the mobile app")
-    digest = hashlib.sha256(source)
+def recipe_fingerprint(builder=ROOT):
+    digest = hashlib.sha256()
     for pattern in ["build-config.json", "scripts/*", ".github/workflows/*.yml"]:
         for path in sorted(builder.glob(pattern)):
             if path.is_file():
@@ -56,20 +50,50 @@ def input_fingerprint(upstream, builder=ROOT):
     return digest.hexdigest()
 
 
+def source_fingerprint(source):
+    if b"apps/mobile/app.config.ts" not in source:
+        raise ValueError("Upstream checkout does not contain the mobile app")
+    return hashlib.sha256(source).hexdigest()
+
+
+def selected_tree(tree):
+    if tree.get("truncated"):
+        raise RuntimeError("Upstream tree was truncated; cannot safely check changes")
+    entries = [entry for entry in tree["tree"] if entry["type"] != "tree" and any(
+        entry["path"] == path or entry["path"].startswith(path + "/") for path in INPUT_PATHS
+    )]
+    return "".join(f"{e['mode']} {e['type']} {e['sha']}\t{e['path']}\n"
+                   for e in sorted(entries, key=lambda entry: entry["path"])).encode()
+
+
+def input_fingerprint(upstream, builder=ROOT):
+    source = subprocess.check_output(
+        ["git", "ls-tree", "-r", "HEAD", "--", *INPUT_PATHS], cwd=upstream
+    )
+    return hashlib.sha256((source_fingerprint(source) + recipe_fingerprint(builder)).encode()).hexdigest()
+
+
 def select():
     config = json.loads((ROOT / "build-config.json").read_text())
     repo = config["upstream"]
+    nightly_pattern = r"v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+"
+    requested = os.environ.get("UPSTREAM_TAG", "").strip()
     release = None
-    for page in range(1, 6):
-        releases = api(f"repos/{repo}/releases?per_page=100&page={page}")
-        eligible = [r for r in releases if not r["draft"] and re.fullmatch(
-            r"v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+", r["tag_name"]
-        )]
-        if eligible:
-            release = max(eligible, key=lambda r: r["published_at"])
-            break
-        if not releases:
-            break
+    if requested:
+        if not re.fullmatch(nightly_pattern, requested):
+            raise ValueError("Manual source must be an exact published vX.Y.Z-nightly.YYYYMMDD.N tag")
+        release = api(f"repos/{repo}/releases/tags/{requested}")
+        if release["draft"]:
+            raise ValueError("Cannot build an unpublished draft release")
+    else:
+        for page in range(1, 6):
+            releases = api(f"repos/{repo}/releases?per_page=30&page={page}")
+            eligible = [r for r in releases if not r["draft"] and re.fullmatch(nightly_pattern, r["tag_name"])]
+            if eligible:
+                release = max(eligible, key=lambda r: r["published_at"])
+                break
+            if not releases:
+                break
     if release is None:
         raise RuntimeError("No published upstream nightly found")
     commit = api(f"repos/{repo}/commits/{release['tag_name']}")["sha"]
@@ -85,20 +109,28 @@ def select():
 def check():
     plan_path = ROOT / "build-plan.json"
     plan = json.loads(plan_path.read_text())
-    fingerprint = input_fingerprint(ROOT / "upstream")
     latest = api(f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/latest", missing_ok=True)
-    previous = None
+    previous = {}
     if latest:
         asset = next((a for a in latest["assets"] if a["name"] == "build-info.json"), None)
         if asset is None:
             raise RuntimeError("Latest release has no build-info.json; refusing an ambiguous comparison")
         with urlopen(asset["browser_download_url"], timeout=30) as response:
-            previous = json.load(response).get("input_fingerprint")
+            previous = json.load(response)
+    recipe = recipe_fingerprint()
+    # No source checkout or SDK/dependency setup for an unchanged daily check.
+    if previous.get("upstream_sha") == plan["upstream_sha"] and previous.get("source_fingerprint"):
+        source = previous["source_fingerprint"]
+    else:
+        tree = api(f"repos/{plan['upstream']}/git/trees/{plan['upstream_sha']}?recursive=1")
+        source = source_fingerprint(selected_tree(tree))
+    fingerprint = hashlib.sha256((source + recipe).encode()).hexdigest()
     force = os.environ.get("FORCE_BUILD", "false") == "true"
-    needed = fingerprint != previous or force
+    needed = fingerprint != previous.get("input_fingerprint") or force
     run = int(os.environ["GITHUB_RUN_NUMBER"])
     release_tag = f"mobile-{plan['upstream_tag'].removeprefix('v')}-{fingerprint[:12]}-r{run}"
-    plan.update(input_fingerprint=fingerprint, release_tag=release_tag, version_code=run)
+    plan.update(input_fingerprint=fingerprint, source_fingerprint=source, recipe_fingerprint=recipe,
+                release_tag=release_tag, version_code=run)
     plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     output(needed=str(needed).lower(), fingerprint=fingerprint, release_tag=release_tag)
     message = "Mobile build inputs changed; building an APK." if needed else "Mobile build inputs unchanged; skipping."

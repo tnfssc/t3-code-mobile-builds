@@ -6,12 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Build even if mobile inputs match the latest successful release
+        description: Publish a new APK even if mobile inputs are unchanged
         type: boolean
-        default: false
+        default: true
+      upstream_tag:
+        description: Exact upstream nightly tag (leave blank for the newest published nightly)
+        type: string
+        default: ''
   push:
     branches: [main]
-    paths: ['scripts/**', '.github/workflows/android.yml', 'build-config.json']
+    paths: ['scripts/**', 'tests/**', '.github/workflows/android.yml', 'build-config.json']
 
 permissions:
   contents: read
@@ -21,9 +25,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -v
+
+  build:
+    if: github.event_name != 'push'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: write
     env:
@@ -38,26 +53,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test change detection
-        run: python3 -m unittest discover -s tests -v
-
       - name: Select latest published nightly
         id: source
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: python3 scripts/upstream.py select
 
+      - name: Compare mobile and shared build inputs without downloading source
+        id: changes
+        env:
+          FORCE_BUILD: ${{ inputs.force || 'false' }}
+        run: python3 scripts/upstream.py check
+
       - name: Checkout immutable upstream source
+        if: steps.changes.outputs.needed == 'true'
         uses: actions/checkout@v6
         with:
           repository: pingdotgg/t3code
           ref: ${{ steps.source.outputs.sha }}
           path: upstream
           persist-credentials: false
-
-      - name: Compare mobile and shared build inputs
-        id: changes
-        env:
-          FORCE_BUILD: ${{ inputs.force || 'false' }}
-        run: python3 scripts/upstream.py check
 
       - name: Free Android build disk space
         if: steps.changes.outputs.needed == 'true'
@@ -104,7 +119,7 @@ jobs:
         if: steps.changes.outputs.needed == 'true'
         working-directory: upstream/apps/mobile/android
         run: |
-          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 \
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 --build-cache \
             -PreactNativeArchitectures=arm64-v8a \
             -Dorg.gradle.jvmargs='-Xmx4096m -XX:MaxMetaspaceSize=1024m'
 
@@ -153,3 +168,4 @@ jobs:
             upstream/apps/mobile/android/build/reports/
             upstream/apps/mobile/android/app/build/reports/
           if-no-files-found: ignore
+          retention-days: 3

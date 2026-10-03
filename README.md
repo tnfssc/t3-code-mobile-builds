@@ -8,9 +8,22 @@ The app is named **T3 Code Mobile Builds**, uses `com.tnfssc.t3code.mobilebuilds
 
 ## Daily builds
 
-GitHub Actions checks the latest published upstream nightly daily at **02:23 UTC / 06:23 Asia/Dubai**. GitHub may delay scheduled runs. It builds only when mobile code, shared dependencies, build assets, lockfiles, or this repository's build recipe differ from the latest successful release. A web/server-only source change does not by itself trigger a build. Failed builds do not advance the comparison baseline.
+GitHub Actions checks the latest published upstream nightly daily at **02:23 UTC / 06:23 Asia/Dubai**. GitHub may delay scheduled runs. It builds only when mobile code, shared dependencies, build assets, lockfiles, or this repository's build recipe differ from the latest successful release. A web/server-only source change does not by itself trigger a build. Failed builds do not advance the comparison baseline. The check uses GitHub's source tree API; unchanged checks do not download the source, install dependencies or set up Android.
 
-Use **Actions → Android APK → Run workflow** to check immediately. Enable **force** to rebuild identical inputs. Changes to the build recipe also run the workflow. Releases include the upstream commit, input fingerprint, APK checksum, signing-certificate fingerprint, upstream MIT license and build-log link.
+Use **Actions → Android APK → Run workflow** for a manual release. Leave `upstream_tag` empty to use the newest nightly, or enter an exact published nightly tag. `force` defaults to enabled so a manual run publishes even when inputs are unchanged; disable it for a check-only run. Pushes only run quick automation tests. Releases include the upstream commit, input fingerprint, APK checksum, signing-certificate fingerprint, upstream MIT license and build-log link.
+
+From the GitHub CLI:
+
+```sh
+gh workflow run android.yml --repo tnfssc/t3-code-mobile-builds
+# Or choose a specific published nightly:
+gh workflow run android.yml --repo tnfssc/t3-code-mobile-builds \
+  -f upstream_tag=v0.0.46-nightly.20261003.2623 -f force=true
+```
+
+## CI time and cost
+
+This public repository uses standard `ubuntu-24.04` runners, not paid larger runners. [GitHub documents free Actions usage for public repositories on standard hosted runners](https://docs.github.com/en/billing/concepts/product-billing/github-actions). The workflow builds ARM64 only, caches package-manager and Gradle dependencies, enables Gradle's build cache, serializes release builds, and caps a build at 60 minutes. Failed-build diagnostics expire after three days; APKs are stored as release assets rather than duplicate Actions artifacts. Cold native builds take longer than unchanged daily checks.
 
 ## Distribution differences
 

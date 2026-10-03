@@ -33,10 +33,12 @@ export default config;
 path.write_text(text.replace("export default config;", overrides))
 plan.update(app_version=app_version, version_name=version_name,
             package=config["package"], architectures=config["architectures"],
-            orchestration_protocol=2, ota_updates=False, cloud_features=False)
-# Fail closed if upstream drops/moves protocol negotiation.
+            ota_updates=False, cloud_features=False)
+# Record the real upstream protocol; newer major versions can keep building.
 contracts = (source / "packages/contracts/src/environment.ts").read_text()
-if not re.search(r"ORCHESTRATION_PROTOCOL_VERSION\s*=\s*2\b", contracts):
-    raise RuntimeError("Expected orchestration protocol 2; review mobile/server compatibility")
+protocol = re.search(r"ORCHESTRATION_PROTOCOL_VERSION\s*=\s*(\d+)\b", contracts)
+if protocol is None:
+    raise RuntimeError("Cannot determine the upstream orchestration protocol")
+plan["orchestration_protocol"] = int(protocol[1])
 plan_path.write_text(json.dumps(plan, indent=2) + "\n")
 print(f"Prepared {config['package']} {version_name}")
