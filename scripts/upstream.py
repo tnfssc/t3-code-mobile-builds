@@ -73,6 +73,35 @@ def input_fingerprint(upstream, builder=ROOT):
     return hashlib.sha256((source_fingerprint(source) + recipe_fingerprint(builder)).encode()).hexdigest()
 
 
+def latest_build():
+    latest = api(f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/latest", missing_ok=True)
+    if not latest:
+        return {}
+    asset = next((a for a in latest["assets"] if a["name"] == "build-info.json"), None)
+    if asset is None:
+        raise RuntimeError("Latest release has no build-info.json; refusing an ambiguous comparison")
+    with urlopen(asset["browser_download_url"], timeout=30) as response:
+        return json.load(response)
+
+
+def gate():
+    config = json.loads((ROOT / "build-config.json").read_text())
+    stable = api(f"repos/{config['upstream']}/releases/latest")
+    if stable["draft"] or stable["prerelease"] or not re.fullmatch(r"v\d+\.\d+\.\d+", stable["tag_name"]):
+        raise RuntimeError("Latest upstream release is not a published stable desktop release")
+    previous = latest_build()
+    force = os.environ.get("FORCE_BUILD", "false") == "true"
+    eligible = force or stable["tag_name"] != previous.get("stable_trigger_tag")
+    plan = {"stable_trigger_tag": stable["tag_name"], "stable_trigger_release": stable["html_url"],
+            "stable_trigger_published_at": stable["published_at"]}
+    (ROOT / "build-plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+    output(eligible=str(eligible).lower(), stable_tag=stable["tag_name"])
+    message = ("Manual release requested." if force else "New stable desktop release; build its latest mobile nightly.") if eligible else "Stable desktop release unchanged; skipping the APK build."
+    print(message)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as destination:
+        destination.write(f"## Stable release check\n\n{message}\n\nStable: {stable['tag_name']}\n")
+
+
 def select():
     config = json.loads((ROOT / "build-config.json").read_text())
     repo = config["upstream"]
@@ -99,8 +128,10 @@ def select():
     commit = api(f"repos/{repo}/commits/{release['tag_name']}")["sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Invalid upstream commit")
-    plan = {"upstream": repo, "upstream_tag": release["tag_name"],
-            "upstream_sha": commit, "upstream_release": release["html_url"]}
+    plan_path = ROOT / "build-plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan.update(upstream=repo, upstream_tag=release["tag_name"],
+                upstream_sha=commit, upstream_release=release["html_url"])
     (ROOT / "build-plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     output(sha=commit, tag=release["tag_name"])
     print(f"Selected {repo}@{release['tag_name']} ({commit})")
@@ -109,14 +140,7 @@ def select():
 def check():
     plan_path = ROOT / "build-plan.json"
     plan = json.loads(plan_path.read_text())
-    latest = api(f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/latest", missing_ok=True)
-    previous = {}
-    if latest:
-        asset = next((a for a in latest["assets"] if a["name"] == "build-info.json"), None)
-        if asset is None:
-            raise RuntimeError("Latest release has no build-info.json; refusing an ambiguous comparison")
-        with urlopen(asset["browser_download_url"], timeout=30) as response:
-            previous = json.load(response)
+    previous = latest_build()
     recipe = recipe_fingerprint()
     # No source checkout or SDK/dependency setup for an unchanged daily check.
     if previous.get("upstream_sha") == plan["upstream_sha"] and previous.get("source_fingerprint"):
@@ -126,18 +150,19 @@ def check():
         source = source_fingerprint(selected_tree(tree))
     fingerprint = hashlib.sha256((source + recipe).encode()).hexdigest()
     force = os.environ.get("FORCE_BUILD", "false") == "true"
-    needed = fingerprint != previous.get("input_fingerprint") or force
+    new_stable = plan.get("stable_trigger_tag") != previous.get("stable_trigger_tag")
+    needed = fingerprint != previous.get("input_fingerprint") or force or new_stable
     run = int(os.environ["GITHUB_RUN_NUMBER"])
     release_tag = f"mobile-{plan['upstream_tag'].removeprefix('v')}-{fingerprint[:12]}-r{run}"
     plan.update(input_fingerprint=fingerprint, source_fingerprint=source, recipe_fingerprint=recipe,
                 release_tag=release_tag, version_code=run)
     plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     output(needed=str(needed).lower(), fingerprint=fingerprint, release_tag=release_tag)
-    message = "Mobile build inputs changed; building an APK." if needed else "Mobile build inputs unchanged; skipping."
+    message = "Building the selected mobile nightly for this release." if needed else "Mobile build inputs unchanged; skipping."
     print(message)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as destination:
         destination.write(f"## Upstream check\n\n{message}\n\nUpstream: {plan['upstream_tag']}\n")
 
 
 if __name__ == "__main__":
-    {"select": select, "check": check}[sys.argv[1]]()
+    {"gate": gate, "select": select, "check": check}[sys.argv[1]]()

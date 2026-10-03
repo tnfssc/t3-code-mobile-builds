@@ -23,6 +23,7 @@ files = [apk, dist / "build-info.json", dist / "UPSTREAM-LICENSE.txt"]
 notes = f"""Independent Android build of [T3 Code]({plan['upstream_release']}).
 
 - Upstream: `{plan['upstream_tag']}` / `{plan['upstream_sha']}`
+- Stable desktop release recorded for the daily gate: [{plan['stable_trigger_tag']}]({plan['stable_trigger_release']})
 - Android app: `{plan['version_name']}`, orchestration protocol {plan['orchestration_protocol']}
 - CPU: ARM64 (modern Android phones); Android 7.0 or newer
 - Package: `{plan['package']}`; installs alongside the official app

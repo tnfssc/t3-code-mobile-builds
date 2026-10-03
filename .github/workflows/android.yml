@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   validate:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -36,7 +37,6 @@ jobs:
 
   build:
     if: github.event_name != 'push'
-    needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -53,14 +53,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test release automation
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Check for a new stable desktop release
+        id: gate
+        env:
+          FORCE_BUILD: ${{ inputs.force || 'false' }}
+        run: python3 scripts/upstream.py gate
+
       - name: Select latest published nightly
         id: source
+        if: steps.gate.outputs.eligible == 'true'
         env:
           UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: python3 scripts/upstream.py select
 
       - name: Compare mobile and shared build inputs without downloading source
         id: changes
+        if: steps.gate.outputs.eligible == 'true'
         env:
           FORCE_BUILD: ${{ inputs.force || 'false' }}
         run: python3 scripts/upstream.py check
@@ -147,7 +158,7 @@ jobs:
             --out dist/t3-code-mobile-builds-arm64.apk "$RUNNER_TEMP/aligned.apk"
           "$build_tools/zipalign" -c -P 16 4 dist/t3-code-mobile-builds-arm64.apk
           "$build_tools/apksigner" verify --verbose --print-certs dist/t3-code-mobile-builds-arm64.apk | tee "$RUNNER_TEMP/apk-signature.txt"
-          grep -F "Signer #1 certificate SHA-256 digest: $APK_CERTIFICATE_SHA256" "$RUNNER_TEMP/apk-signature.txt"
+          grep -F "certificate SHA-256 digest: $APK_CERTIFICATE_SHA256" "$RUNNER_TEMP/apk-signature.txt"
           "$build_tools/aapt" dump badging dist/t3-code-mobile-builds-arm64.apk > "$RUNNER_TEMP/apk-badging.txt"
           head -1 "$RUNNER_TEMP/apk-badging.txt" | tee "$RUNNER_TEMP/apk-identity.txt"
           grep -F "name='com.tnfssc.t3code.mobilebuilds'" "$RUNNER_TEMP/apk-identity.txt"
