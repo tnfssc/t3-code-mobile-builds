@@ -1,0 +1,7 @@
+upstream/
+dist/
+build-plan.json
+__pycache__/
+*.jks
+*.keystore
+*.apk

@@ -1,0 +1,8 @@
+{
+  "upstream": "pingdotgg/t3code",
+  "channel": "nightly",
+  "package": "com.tnfssc.t3code.mobilebuilds",
+  "name": "T3 Code Mobile Builds",
+  "scheme": "t3code-mobile-builds",
+  "architectures": "arm64-v8a"
+}

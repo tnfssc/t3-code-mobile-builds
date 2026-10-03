@@ -1,0 +1,153 @@
+name: Android APK
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if mobile inputs match the latest successful release
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ['scripts/**', '.github/workflows/android.yml', 'build-config.json']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      CI: '1'
+      APP_VARIANT: production
+      T3CODE_MOBILE_UPDATES_ENABLED: '0'
+      NODE_OPTIONS: --max-old-space-size=4096
+      EXPO_NO_TELEMETRY: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Test change detection
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Select latest published nightly
+        id: source
+        run: python3 scripts/upstream.py select
+
+      - name: Checkout immutable upstream source
+        uses: actions/checkout@v6
+        with:
+          repository: pingdotgg/t3code
+          ref: ${{ steps.source.outputs.sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Compare mobile and shared build inputs
+        id: changes
+        env:
+          FORCE_BUILD: ${{ inputs.force || 'false' }}
+        run: python3 scripts/upstream.py check
+
+      - name: Free Android build disk space
+        if: steps.changes.outputs.needed == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk
+          df -h /
+
+      - name: Set up Java
+        if: steps.changes.outputs.needed == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        if: steps.changes.outputs.needed == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Vite+ and install mobile dependencies
+        if: steps.changes.outputs.needed == 'true'
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          working-directory: upstream
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+
+      - name: Cache Gradle dependencies
+        if: steps.changes.outputs.needed == 'true'
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Prepare independent app and generate Android project
+        if: steps.changes.outputs.needed == 'true'
+        run: |
+          python3 scripts/prepare-build.py
+          cd upstream/apps/mobile
+          vp exec expo prebuild --clean --platform android --no-install
+
+      - name: Build ARM64 release APK with bundled JavaScript
+        if: steps.changes.outputs.needed == 'true'
+        working-directory: upstream/apps/mobile/android
+        run: |
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 \
+            -PreactNativeArchitectures=arm64-v8a \
+            -Dorg.gradle.jvmargs='-Xmx4096m -XX:MaxMetaspaceSize=1024m'
+
+      - name: Sign and verify APK
+        if: steps.changes.outputs.needed == 'true'
+        env:
+          APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+          APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+          APK_CERTIFICATE_SHA256: ${{ vars.APK_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$APK_KEYSTORE_BASE64"
+          test -n "$APK_CERTIFICATE_SHA256"
+          key_file="$RUNNER_TEMP/t3-mobile-builds.jks"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$APK_KEYSTORE_BASE64" | base64 --decode > "$key_file"
+          chmod 600 "$key_file"
+          mkdir -p dist
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          source_apk=upstream/apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          "$build_tools/zipalign" -P 16 -f 4 "$source_apk" "$RUNNER_TEMP/aligned.apk"
+          "$build_tools/apksigner" sign --ks "$key_file" --ks-key-alias t3-mobile-builds \
+            --ks-pass env:APK_KEYSTORE_PASSWORD --key-pass env:APK_KEY_PASSWORD \
+            --out dist/t3-code-mobile-builds-arm64.apk "$RUNNER_TEMP/aligned.apk"
+          "$build_tools/zipalign" -c -P 16 4 dist/t3-code-mobile-builds-arm64.apk
+          "$build_tools/apksigner" verify --verbose --print-certs dist/t3-code-mobile-builds-arm64.apk | tee "$RUNNER_TEMP/apk-signature.txt"
+          grep -F "Signer #1 certificate SHA-256 digest: $APK_CERTIFICATE_SHA256" "$RUNNER_TEMP/apk-signature.txt"
+          "$build_tools/aapt" dump badging dist/t3-code-mobile-builds-arm64.apk | head -1 | tee "$RUNNER_TEMP/apk-identity.txt"
+          grep -F "name='com.tnfssc.t3code.mobilebuilds'" "$RUNNER_TEMP/apk-identity.txt"
+          unzip -l dist/t3-code-mobile-builds-arm64.apk | grep -F assets/index.android.bundle
+
+      - name: Publish APK, provenance and checksums
+        if: steps.changes.outputs.needed == 'true'
+        env:
+          APK_CERTIFICATE_SHA256: ${{ vars.APK_CERTIFICATE_SHA256 }}
+        run: python3 scripts/publish.py
+
+      - name: Keep failed build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-diagnostics-${{ github.run_number }}
+          path: |
+            build-plan.json
+            upstream/apps/mobile/android/build/reports/
+            upstream/apps/mobile/android/app/build/reports/
+          if-no-files-found: ignore
